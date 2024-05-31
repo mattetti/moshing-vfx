@@ -331,39 +331,25 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 
 func processFile(inputFile *os.File, outputFile *os.File) error {
 	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
-	w := mp4.NewWriter(outputFile)
-
-	var trackDuration float64
-
-	// info, err := mp4.Probe(r)
-	// if err != nil {
-	// 	fmt.Println("Error probing MP4 file:", err)
-	// 	return err
-	// }
-
-	// for i, track := range info.Tracks {
-	// 	fmt.Printf("Track [%d] %d\n", i, track.TrackID)
-	// 	if track.AVC != nil {
-	// 		fmt.Println("  AVC length:", track.AVC.LengthSize)
-	// 		fmt.Printf("	%d chunks\n", len(track.Chunks))
-	// 	}
-	// }
+	// w := mp4.NewWriter(outputFile)
+	// TODO: extract all boxes and copy them to the output file.
 
 	bis, err := mp4.ExtractBoxes(r, nil, []mp4.BoxPath{
 		{mp4.BoxTypeMoov(), mp4.BoxTypeMvhd()},
 		{mp4.BoxTypeMoov(), mp4.BoxTypeTrak()},
+		{mp4.BoxTypeMdat()},
 	})
 	if err != nil {
 		fmt.Println("Error extracting boxes from MP4 file:", err)
 		return err
 	}
 
-	var Duration uint64
-	var Timescale uint32
+	var track *mp4.Track
 
 	for _, bi := range bis {
 		switch bi.Type {
 		case mp4.BoxTypeMvhd():
+			track = &mp4.Track{}
 			var mvhd mp4.Mvhd
 			if _, err := bi.SeekToPayload(r); err != nil {
 				return err
@@ -371,14 +357,14 @@ func processFile(inputFile *os.File, outputFile *os.File) error {
 			if _, err := mp4.Unmarshal(r, bi.Size-bi.HeaderSize, &mvhd, bi.Context); err != nil {
 				return err
 			}
-			Timescale = mvhd.Timescale
+			track.Timescale = mvhd.Timescale
 			if mvhd.GetVersion() == 0 {
-				Duration = uint64(mvhd.DurationV0)
+				track.Duration = uint64(mvhd.DurationV0)
 			} else {
-				Duration = mvhd.DurationV1
+				track.Duration = mvhd.DurationV1
 			}
 		case mp4.BoxTypeTrak():
-			track, err := processTrak(r, bi)
+			track, err = processTrak(r, bi)
 			if err != nil {
 				return err
 			}
@@ -401,79 +387,122 @@ func processFile(inputFile *os.File, outputFile *os.File) error {
 				fmt.Printf("  AVC: height %d\n", track.AVC.Height)
 			}
 			fmt.Println()
-		case mp4.BoxTypeMoof():
-			// segment, err := probeMoof(r, bi)
-			// if err != nil {
-			// 	return nil, err
-			// }
-			// probeInfo.Segments = append(probeInfo.Segments, segment)
-		}
-	}
-
-	fmt.Println("Duration:", Duration)
-	fmt.Println("Timescale:", Timescale)
-
-	boxes, err := mp4.ExtractBoxWithPayload(r, nil, mp4.BoxPath{mp4.BoxTypeMoov()})
-	if err != nil {
-		fmt.Println("Error processing MP4 file:", err)
-		return err
-	}
-
-	for _, box := range boxes {
-		switch box.Info.Type {
-		case mp4.BoxTypeMoov():
-
-			nestedBoxes, err := mp4.ExtractBoxWithPayload(r, &box.Info, mp4.BoxPath{mp4.BoxTypeMvhd()})
-			if err != nil {
-				fmt.Println("Error processing moov box:", err)
-				continue
-			}
-
-			for _, nestedBox := range nestedBoxes {
-				switch nestedBox.Info.Type {
-				case mp4.BoxTypeMvhd():
-					mvhd := nestedBox.Payload.(*mp4.Mvhd)
-					trackDuration = float64(mvhd.GetDuration()) / float64(mvhd.Timescale)
-					fmt.Println("Track Duration:", trackDuration)
+			if track.AVC != nil {
+				if err = processTrack(r, track); err != nil {
+					fmt.Println("Error processing track:", err)
+					return err
 				}
 			}
+		case mp4.BoxTypeMoof():
+		case mp4.BoxTypeMdat():
+			fmt.Println("mdat box found")
 		}
 	}
 
-	_, err = mp4.ReadBoxStructure(r, func(h *mp4.ReadHandle) (interface{}, error) {
-		switch h.BoxInfo.Type {
+	// 	boxes, err := mp4.ExtractBoxWithPayload(r, nil, mp4.BoxPath{mp4.BoxTypeMoov()})
+	// 	if err != nil {
+	// 		fmt.Println("Error processing MP4 file:", err)
+	// 		return err
+	// 	}
 
-		case mp4.BoxTypeMdat():
+	// 	for _, box := range boxes {
+	// 		switch box.Info.Type {
+	// 		case mp4.BoxTypeMoov():
 
-			if _, err := w.StartBox(&h.BoxInfo); err != nil {
-				return nil, err
+	// 			nestedBoxes, err := mp4.ExtractBoxWithPayload(r, &box.Info, mp4.BoxPath{mp4.BoxTypeMvhd()})
+	// 			if err != nil {
+	// 				fmt.Println("Error processing moov box:", err)
+	// 				continue
+	// 			}
+
+	// 			for _, nestedBox := range nestedBoxes {
+	// 				switch nestedBox.Info.Type {
+	// 				case mp4.BoxTypeMvhd():
+	// 					mvhd := nestedBox.Payload.(*mp4.Mvhd)
+	// 					trackDuration = float64(mvhd.GetDuration()) / float64(mvhd.Timescale)
+	// 					fmt.Println("Track Duration:", trackDuration)
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+
+	// 	_, err = mp4.ReadBoxStructure(r, func(h *mp4.ReadHandle) (interface{}, error) {
+	// 		switch h.BoxInfo.Type {
+
+	// 		case mp4.BoxTypeMdat():
+
+	// 			if _, err := w.StartBox(&h.BoxInfo); err != nil {
+	// 				return nil, err
+	// 			}
+
+	// 			box, _, err := h.ReadPayload()
+	// 			if err != nil {
+	// 				return nil, err
+	// 			}
+	// 			mdat := box.(*mp4.Mdat)
+
+	// 			mdat.Data = duplicateAndRemoveFrames(mdat.Data, duplicationChance, removalChance, trackDuration)
+
+	// 			if _, err := mp4.Marshal(w, mdat, h.BoxInfo.Context); err != nil {
+	// 				return nil, err
+	// 			}
+
+	// 			if _, err := w.EndBox(); err != nil {
+	// 				return nil, err
+	// 			}
+	// 		default:
+	// 			fmt.Println("Copying box:", h.BoxInfo.Type)
+
+	// 			return nil, w.CopyBox(r, &h.BoxInfo)
+	// 		}
+	// 		return nil, nil
+	// 	})
+
+	// 	if err != nil {
+	// 		fmt.Println("Error processing MP4 file:", err)
+	// 	}
+	return nil
+}
+
+func processTrack(r io.ReadSeeker, track *mp4.Track) error {
+	if track.AVC == nil {
+		return errors.New("AVC configuration not found")
+	}
+	lengthSize := uint32(track.AVC.LengthSize)
+
+	var si int
+	idxs := make([]int, 0, 8)
+	for _, chunk := range track.Chunks {
+		end := si + int(chunk.SamplesPerChunk)
+		dataOffset := chunk.DataOffset
+		for ; si < end && si < len(track.Samples); si++ {
+			sample := track.Samples[si]
+			if sample.Size == 0 {
+				continue
 			}
-
-			box, _, err := h.ReadPayload()
-			if err != nil {
-				return nil, err
+			for nalOffset := uint32(0); nalOffset+lengthSize+1 <= sample.Size; {
+				if _, err := r.Seek(int64(dataOffset+uint64(nalOffset)), io.SeekStart); err != nil {
+					return err
+				}
+				data := make([]byte, lengthSize+1)
+				if _, err := io.ReadFull(r, data); err != nil {
+					return err
+				}
+				var length uint32
+				for i := 0; i < int(lengthSize); i++ {
+					length = (length << 8) + uint32(data[i])
+				}
+				nalHeader := data[lengthSize]
+				nalType := nalHeader & 0x1f
+				fmt.Println("NAL type:", nalType)
+				if nalType == 5 {
+					idxs = append(idxs, si)
+					break
+				}
+				nalOffset += lengthSize + length
 			}
-			mdat := box.(*mp4.Mdat)
-
-			mdat.Data = duplicateAndRemoveFrames(mdat.Data, duplicationChance, removalChance, trackDuration)
-
-			if _, err := mp4.Marshal(w, mdat, h.BoxInfo.Context); err != nil {
-				return nil, err
-			}
-
-			if _, err := w.EndBox(); err != nil {
-				return nil, err
-			}
-		default:
-			fmt.Println("Copying box:", h.BoxInfo.Type)
-
-			return nil, w.CopyBox(r, &h.BoxInfo)
+			dataOffset += uint64(sample.Size)
 		}
-		return nil, nil
-	})
-
-	if err != nil {
-		fmt.Println("Error processing MP4 file:", err)
 	}
 	return nil
 }
