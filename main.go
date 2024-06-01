@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"math/rand"
@@ -19,6 +20,14 @@ var (
 	err               error
 	outputFileName    string
 )
+
+var debug = flag.Bool("debug", false, "Enable debug mode")
+
+type NALUnit struct {
+	Type   byte
+	Offset int64
+	Length uint32
+}
 
 // duplicateAndRemoveFrames processes the video data, removing I-frames and optionally duplicating D-frames.
 func duplicateAndRemoveFrames(data []byte, duplicationChance int, removalChance int, trackDuration float64) []byte {
@@ -72,6 +81,8 @@ func duplicateAndRemoveFrames(data []byte, duplicationChance int, removalChance 
 }
 
 func main() {
+	flag.Parse()
+
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: <input_file> <duplication_chance> <removal_chance> <output_file>")
 		return
@@ -124,13 +135,6 @@ func main() {
 	}
 	defer outputFile.Close()
 
-	// First extract the duration, then process the frames
-	// Traverse the moov box to find the mvhd box
-	// Write box header to the output file
-	// Apply frame duplication and removal
-	// Write modified payload to the output file
-	// End the box
-	// Copy all other boxes to the output file
 	err = processFile(inputFile, outputFile)
 	if err != nil {
 		fmt.Println("Error processing file:", err)
@@ -230,7 +234,9 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 				MediaTime:       elst.GetMediaTime(i),
 				SegmentDuration: elst.GetSegmentDuration(i),
 			})
-			fmt.Printf("Segment: time: %d duration: %d\n", elst.GetMediaTime(i), elst.GetSegmentDuration(i))
+			if *debug {
+				fmt.Printf("Segment: time: %d duration: %d\n", elst.GetMediaTime(i), elst.GetSegmentDuration(i))
+			}
 		}
 		track.EditList = editList
 	}
@@ -332,30 +338,39 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 func processFile(inputFile *os.File, outputFile *os.File) error {
 	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
 	// w := mp4.NewWriter(outputFile)
-	// TODO: extract all boxes and copy them to the output file.
-
-	bis, err := mp4.ExtractBoxes(r, nil, []mp4.BoxPath{
-		{mp4.BoxTypeMoov(), mp4.BoxTypeMvhd()},
-		{mp4.BoxTypeMoov(), mp4.BoxTypeTrak()},
-		{mp4.BoxTypeMdat()},
-	})
-	if err != nil {
-		fmt.Println("Error extracting boxes from MP4 file:", err)
-		return err
-	}
 
 	var track *mp4.Track
+	// keeping track of NAL units so we can process them later
+	NALunits := []NALUnit{}
 
-	for _, bi := range bis {
-		switch bi.Type {
+	_, err = mp4.ReadBoxStructure(r, func(h *mp4.ReadHandle) (interface{}, error) {
+
+		if *debug {
+			fmt.Println("Box:", h.BoxInfo.Type)
+		}
+
+		if !h.BoxInfo.IsSupportedType() {
+			// copy all data
+			// if err = w.CopyBox(r, &h.BoxInfo); err != nil {
+			// 	return nil, err
+			// }
+			return nil, nil
+		}
+
+		bi := &h.BoxInfo
+
+		switch h.BoxInfo.Type {
+
+		// header
 		case mp4.BoxTypeMvhd():
+
 			track = &mp4.Track{}
 			var mvhd mp4.Mvhd
 			if _, err := bi.SeekToPayload(r); err != nil {
-				return err
+				return nil, err
 			}
 			if _, err := mp4.Unmarshal(r, bi.Size-bi.HeaderSize, &mvhd, bi.Context); err != nil {
-				return err
+				return nil, err
 			}
 			track.Timescale = mvhd.Timescale
 			if mvhd.GetVersion() == 0 {
@@ -363,10 +378,11 @@ func processFile(inputFile *os.File, outputFile *os.File) error {
 			} else {
 				track.Duration = mvhd.DurationV1
 			}
+
 		case mp4.BoxTypeTrak():
 			track, err = processTrak(r, bi)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			fmt.Printf("Track: %d\n", track.TrackID)
 			fmt.Printf("  Duration: %d\n", track.Duration)
@@ -388,93 +404,78 @@ func processFile(inputFile *os.File, outputFile *os.File) error {
 			}
 			fmt.Println()
 			if track.AVC != nil {
-				if err = processTrack(r, track); err != nil {
+				trackNALs, err := processTrack(r, track)
+				if err != nil {
 					fmt.Println("Error processing track:", err)
-					return err
+					return nil, err
 				}
+				NALunits = append(NALunits, trackNALs...)
 			}
-		case mp4.BoxTypeMoof():
+
 		case mp4.BoxTypeMdat():
-			fmt.Println("mdat box found")
+			if *debug {
+				fmt.Println("mdat box found, TODO: process it")
+				fmt.Printf("Offset: %d, Size: %d\n\n", bi.Offset, bi.Size)
+			}
+		default:
+		}
+
+		if _, err := h.Expand(); err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	})
+
+	if err != nil {
+		fmt.Println("Error reading box structure:", err)
+		return err
+	}
+
+	// create a copy of the input file
+	if _, err := inputFile.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := io.Copy(outputFile, inputFile); err != nil {
+		return err
+	}
+
+	// rewind the output file and processe the NALUnits
+	if _, err := outputFile.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	for _, nalUnit := range NALunits {
+		switch nalUnit.Type {
+		case 1:
+			fmt.Printf("  P-frame or B-frame | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+		case 5:
+			fmt.Printf("  I-frame\t| offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+		case 6:
+			fmt.Printf("  SEI Metadata | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+		default:
+			fmt.Printf("NAL type: %d, offset: %d, length: %d\n", nalUnit.Type, nalUnit.Offset, nalUnit.Length)
 		}
 	}
 
-	// 	boxes, err := mp4.ExtractBoxWithPayload(r, nil, mp4.BoxPath{mp4.BoxTypeMoov()})
-	// 	if err != nil {
-	// 		fmt.Println("Error processing MP4 file:", err)
-	// 		return err
-	// 	}
-
-	// 	for _, box := range boxes {
-	// 		switch box.Info.Type {
-	// 		case mp4.BoxTypeMoov():
-
-	// 			nestedBoxes, err := mp4.ExtractBoxWithPayload(r, &box.Info, mp4.BoxPath{mp4.BoxTypeMvhd()})
-	// 			if err != nil {
-	// 				fmt.Println("Error processing moov box:", err)
-	// 				continue
-	// 			}
-
-	// 			for _, nestedBox := range nestedBoxes {
-	// 				switch nestedBox.Info.Type {
-	// 				case mp4.BoxTypeMvhd():
-	// 					mvhd := nestedBox.Payload.(*mp4.Mvhd)
-	// 					trackDuration = float64(mvhd.GetDuration()) / float64(mvhd.Timescale)
-	// 					fmt.Println("Track Duration:", trackDuration)
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-
-	// 	_, err = mp4.ReadBoxStructure(r, func(h *mp4.ReadHandle) (interface{}, error) {
-	// 		switch h.BoxInfo.Type {
-
-	// 		case mp4.BoxTypeMdat():
-
-	// 			if _, err := w.StartBox(&h.BoxInfo); err != nil {
-	// 				return nil, err
-	// 			}
-
-	// 			box, _, err := h.ReadPayload()
-	// 			if err != nil {
-	// 				return nil, err
-	// 			}
-	// 			mdat := box.(*mp4.Mdat)
-
-	// 			mdat.Data = duplicateAndRemoveFrames(mdat.Data, duplicationChance, removalChance, trackDuration)
-
-	// 			if _, err := mp4.Marshal(w, mdat, h.BoxInfo.Context); err != nil {
-	// 				return nil, err
-	// 			}
-
-	// 			if _, err := w.EndBox(); err != nil {
-	// 				return nil, err
-	// 			}
-	// 		default:
-	// 			fmt.Println("Copying box:", h.BoxInfo.Type)
-
-	// 			return nil, w.CopyBox(r, &h.BoxInfo)
-	// 		}
-	// 		return nil, nil
-	// 	})
-
-	// 	if err != nil {
-	// 		fmt.Println("Error processing MP4 file:", err)
-	// 	}
 	return nil
 }
 
-func processTrack(r io.ReadSeeker, track *mp4.Track) error {
+func processTrack(r io.ReadSeeker, track *mp4.Track) ([]NALUnit, error) {
 	if track.AVC == nil {
-		return errors.New("AVC configuration not found")
+		return nil, errors.New("AVC configuration not found")
 	}
 	lengthSize := uint32(track.AVC.LengthSize)
 
+	nalUnits := []NALUnit{}
+
 	var si int
-	idxs := make([]int, 0, 8)
-	for _, chunk := range track.Chunks {
+	for nChunk, chunk := range track.Chunks {
 		end := si + int(chunk.SamplesPerChunk)
 		dataOffset := chunk.DataOffset
+		if *debug {
+			fmt.Printf("Chunk %d: offset: %d, samples %d-%d\n", nChunk, dataOffset, si, end)
+		}
 		for ; si < end && si < len(track.Samples); si++ {
 			sample := track.Samples[si]
 			if sample.Size == 0 {
@@ -482,11 +483,11 @@ func processTrack(r io.ReadSeeker, track *mp4.Track) error {
 			}
 			for nalOffset := uint32(0); nalOffset+lengthSize+1 <= sample.Size; {
 				if _, err := r.Seek(int64(dataOffset+uint64(nalOffset)), io.SeekStart); err != nil {
-					return err
+					return nalUnits, err
 				}
 				data := make([]byte, lengthSize+1)
 				if _, err := io.ReadFull(r, data); err != nil {
-					return err
+					return nalUnits, err
 				}
 				var length uint32
 				for i := 0; i < int(lengthSize); i++ {
@@ -494,15 +495,69 @@ func processTrack(r io.ReadSeeker, track *mp4.Track) error {
 				}
 				nalHeader := data[lengthSize]
 				nalType := nalHeader & 0x1f
-				fmt.Println("NAL type:", nalType)
-				if nalType == 5 {
-					idxs = append(idxs, si)
-					break
+
+				if *debug {
+					switch nalType {
+					case 1:
+						fmt.Println("  P-frame or B-frame")
+						// fmt.Println("\tCoded slice of a non-IDR picture")
+						// fmt.Println("\tThis type represents a regular slice of a P-frame or B-frame. Non-IDR pictures are used for inter-prediction and are dependent on other frames for decoding.")
+					case 2:
+						fmt.Println("  Data Partition A")
+					case 3:
+						fmt.Println("  Data Partition B")
+					case 4:
+						fmt.Println("  Data Partition C")
+					case 5:
+						fmt.Println("  I-frame")
+						// fmt.Println("\tCoded slice of an IDR (Instantaneous Decoding Refresh) picture")
+						// fmt.Println("\tAn IDR picture is a special type of I-frame that serves as a recovery point for the decoder. When an IDR picture is encountered, the decoder discards all previously decoded pictures and starts decoding afresh from the IDR picture.")
+					case 6:
+						fmt.Println("  SEI Metadata")
+						// fmt.Println("\tSupplemental Enhancement Information (SEI)")
+						// fmt.Println("\tSEI messages contain metadata about the video stream that can be used for various purposes, such as buffering, picture timing, and user data.")
+					case 7:
+						fmt.Println("  Sequence parameter set")
+					case 8:
+						fmt.Println("  Picture parameter set")
+					case 9:
+						fmt.Println("  Access unit delimiter")
+					case 10:
+						fmt.Println("  End of sequence")
+					case 11:
+						fmt.Println("  End of stream")
+					case 12:
+						fmt.Println("  Filler data")
+					case 13:
+						fmt.Println("  Sequence parameter set extension")
+					case 14:
+						fmt.Println("  Prefix NAL unit")
+					case 15:
+						fmt.Println("  Subset sequence parameter set")
+					case 19:
+						fmt.Println("  Auxiliary coded picture without partitioning")
+					case 20:
+						fmt.Println("  Slice extension")
+					case 21:
+						fmt.Println("  Slice extension for depth view components")
+					default:
+						fmt.Println("  NAL type:", nalType)
+					}
+					fmt.Println(int64(dataOffset+uint64(nalOffset)), length)
+					fmt.Println()
 				}
+
+				nalUnits = append(nalUnits, NALUnit{
+					Type:   nalType,
+					Offset: int64(dataOffset + uint64(nalOffset)),
+					Length: length,
+				})
+
 				nalOffset += lengthSize + length
 			}
 			dataOffset += uint64(sample.Size)
 		}
 	}
-	return nil
+
+	return nalUnits, nil
 }
