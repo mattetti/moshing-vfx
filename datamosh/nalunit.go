@@ -1,6 +1,7 @@
 package datamosh
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -64,64 +65,29 @@ type NALSlice struct {
 var frameMbsOnlyFlag = true
 
 // Parse parses the slice header data from the reader.
-func (s *NALSlice) Parse(r io.ReadSeeker, nalUnitType byte, bitPos *int, currentByte *byte, buffer *[]byte, log2MaxFrameNumMinus4 int, frameMbsOnlyFlag bool) error {
+func (s *NALSlice) Parse(r bitio.Reader) error {
 	var err error
 
-	// Read the first_mb_in_slice
-	s.FirstMbInSlice, err = readExpGolombCode(r, bitPos, currentByte, buffer)
+	// 7.3.3 Slice header syntax
+	s.FirstMbInSlice, err = r.ReadUE()
 	if err != nil {
 		return fmt.Errorf("failed to read first_mb_in_slice: %v", err)
 	}
-	fmt.Printf("FirstMbInSlice: %d\n", s.FirstMbInSlice)
 
-	// Read the slice_type
-	s.SliceType, err = readExpGolombCode(r, bitPos, currentByte, buffer)
+	s.SliceType, err = r.ReadUE()
 	if err != nil {
 		return fmt.Errorf("failed to read slice_type: %v", err)
 	}
-	// fmt.Printf("SliceType: %d\n", s.SliceType)
 
 	// Read the pic_parameter_set_id
-	s.PicParameterSetID, err = readExpGolombCode(r, bitPos, currentByte, buffer)
+	s.PicParameterSetID, err = r.ReadUE()
 	if err != nil {
 		return fmt.Errorf("failed to read pic_parameter_set_id: %v", err)
 	}
-	// fmt.Printf("PicParameterSetID: %d\n", s.PicParameterSetID)
+	// TODO: get the pps and sps from the NALUnit and use that to parse further.
 
-	// Assume log2_max_frame_num_minus4 is 4 (needs adjustment based on actual H.264 configuration)
-	frameNumBits := log2MaxFrameNumMinus4 + 4
-	s.FrameNum, err = readBits(r, bitPos, currentByte, buffer, frameNumBits)
-	if err != nil {
-		return fmt.Errorf("failed to read frame_num: %v", err)
-	}
-	// fmt.Printf("FrameNum: %d\n", s.FrameNum)
-
-	if !frameMbsOnlyFlag {
-		// Read the field_pic_flag (u(1))
-		s.FieldPicFlag, err = readBits(r, bitPos, currentByte, buffer, 1)
-		if err != nil {
-			return fmt.Errorf("failed to read field_pic_flag: %v", err)
-		}
-		// fmt.Printf("FieldPicFlag: %d\n", s.FieldPicFlag)
-
-		if s.FieldPicFlag != 0 {
-			// Read the bottom_field_flag (u(1))
-			s.BottomFieldFlag, err = readBits(r, bitPos, currentByte, buffer, 1)
-			if err != nil {
-				return fmt.Errorf("failed to read bottom_field_flag: %v", err)
-			}
-			// fmt.Printf("BottomFieldFlag: %d\n", s.BottomFieldFlag)
-		}
-	}
-
-	if nalUnitType == 5 {
-		// Read the idr_pic_id if it's an IDR slice
-		s.IdrPicID, err = readExpGolombCode(r, bitPos, currentByte, buffer)
-		if err != nil {
-			return fmt.Errorf("failed to read idr_pic_id: %v", err)
-		}
-		// fmt.Printf("IdrPicID: %d\n", s.IdrPicID)
-	}
+	// hexDump(rs, 8)
+	// bitDump(rs, 8)
 
 	return nil
 }
@@ -144,6 +110,11 @@ func (n *NALUnit) Nullify(w io.WriteSeeker) error {
 	}
 
 	return nil
+}
+func (n *NALUnit) SkipHeader(r io.ReadSeeker) error {
+	// Seek to the start of the NAL unit data, past the header
+	_, err := r.Seek(n.Offset+1, io.SeekStart)
+	return err
 }
 
 func (n *NALUnit) ParseHeader(r io.ReadSeeker) (NALHeader, error) {
@@ -181,6 +152,8 @@ func (n *NALUnit) ParseHeader(r io.ReadSeeker) (NALHeader, error) {
 		return header, errors.New("unexpected NAL unit type")
 	}
 
+	// TODO: extract optional svc_extension_flag, avc_3d_extension_flag based on the unit type.
+
 	// data verification
 	if header.NalRefIdc == 0 {
 		if n.Type == NAL_IDR_SLICE {
@@ -195,6 +168,44 @@ func (n *NALUnit) ParseHeader(r io.ReadSeeker) (NALHeader, error) {
 	}
 
 	return header, nil
+}
+
+// ExtractRBSP extracts the Raw Byte Sequence Payload from the NAL unit.
+func (n *NALUnit) ExtractRBSP(r io.ReadSeeker) ([]byte, error) {
+	// Seek to the start of the NAL unit data.
+	_, err := r.Seek(n.Offset+1, io.SeekStart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to seek to the NAL unit data: %v", err)
+	}
+
+	if (n.Length - 1) <= 0 {
+		return nil, fmt.Errorf("NAL unit data is empty")
+	}
+
+	nalSize := int(n.Length - 1)
+	nalBuf := make([]byte, nalSize)
+	_, err = r.Read(nalBuf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read NAL unit data: %v", err)
+	}
+
+	rbspBuf := make([]byte, len(nalBuf))
+	j := 0
+
+	for i := 0; i < nalSize; i++ {
+		if i+2 < nalSize && nalBuf[i] == 0x00 && nalBuf[i+1] == 0x00 && nalBuf[i+2] == 0x03 {
+			rbspBuf[j] = nalBuf[i]
+			j++
+			rbspBuf[j] = nalBuf[i+1]
+			j++
+			i += 2 // Skip the 0x03 byte
+		} else {
+			rbspBuf[j] = nalBuf[i]
+			j++
+		}
+	}
+
+	return rbspBuf[:j], nil
 }
 
 // SPS represents the parsed sequence parameter set data.
@@ -262,92 +273,44 @@ func (n *NALUnit) ParseSPS(r io.ReadSeeker) (*SPS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read log2_max_frame_num_minus4: %v", err)
 	}
-	fmt.Printf("log2_max_frame_num_minus4: %d\n", sps.Log2MaxFrameNumMinus4)
-
 	// TODO: Continue parsing other SPS fields
 
 	return sps, nil
 }
 
-// ParseNALSlice parses the slice NAL data from the reader and returns the frame type.
-func (n *NALUnit) ParseNALSlice(rs io.ReadSeeker) (string, error) {
-	if n.Type != NAL_SLICE && n.Type != NAL_IDR_SLICE {
+// ParseSlice parses the slice NAL data from the reader and returns the frame type.
+func (n *NALUnit) ParseSlice(rs io.ReadSeeker) (string, error) {
+	if n.Type != NAL_SLICE && n.Type != NAL_IDR_SLICE && n.Type != NAL_AUX_SLICE {
 		return "", errors.New("not a slice NAL unit")
 	}
 
-	// Seek to the start of the NAL unit data.
-	_, err := rs.Seek(n.Offset, io.SeekStart)
+	rbsp, err := n.ExtractRBSP(rs)
 	if err != nil {
-		return "", fmt.Errorf("failed to seek to the NAL unit data: %v", err)
+		return "", fmt.Errorf("failed to extract RBSP: %v", err)
 	}
 
-	header, err := n.ParseHeader(rs)
+	rbspR := bitio.NewReader(bytes.NewReader(rbsp))
+	slice := &NALSlice{}
+	err = slice.Parse(rbspR)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to parse slice header: %v", err)
 	}
-
-	fmt.Println("nal_ref_idc:", header.NalRefIdc, "nal_unit_type:", header.NalUnitType, "expected type:", n.Type)
-
-	fmt.Println()
-
-	// hexDump(rs, 8)
-	// bitDump(rs, 8)
 
 	var frameType string
-	// switch slice.SliceType % 5 {
-	// case 0, 5:
-	// 	frameType = "P"
-	// case 1, 6:
-	// 	frameType = "B"
-	// case 2, 7:
-	// 	frameType = "I"
-	// case 3, 8:
-	// 	frameType = "SP"
-	// case 4, 9:
-	// 	frameType = "SI"
-	// default:
-	// 	frameType = "Unknown"
-	// }
+	switch slice.SliceType % 5 {
+	case 0, 5:
+		frameType = "P"
+	case 1, 6:
+		frameType = "B"
+	case 2, 7:
+		frameType = "I"
+	case 3, 8:
+		frameType = "SP"
+	case 4, 9:
+		frameType = "SI"
+	default:
+		frameType = "Unknown"
+	}
 
 	return frameType, nil
-
-	/*
-		var bitPos int
-		var currentByte byte
-		buffer := make([]byte, 1)
-
-		slice := &NALSlice{}
-		err = slice.Parse(r, n.Type, &bitPos, &currentByte, &buffer, log2MaxFrameNumMinus4, frameMbsOnlyFlag)
-
-		if n.Type == NAL_IDR_SLICE {
-			if slice.SliceType != 2 && slice.SliceType != 4 && slice.SliceType != 7 && slice.SliceType != 9 {
-				return "", errors.New("not a valid IDR slice")
-			}
-		}
-
-		if err != nil {
-			return "", err
-		}
-
-		var frameType string
-		switch slice.SliceType % 5 {
-		case 0, 5:
-			frameType = "P"
-		case 1, 6:
-			frameType = "B"
-		case 2, 7:
-			frameType = "I"
-		case 3, 8:
-			frameType = "SP"
-		case 4, 9:
-			frameType = "SI"
-		default:
-			frameType = "Unknown"
-		}
-
-		fmt.Printf("frame type: %s, pic_parameter_set_id: %d, frame_num: %d, idr_pic_id: %d\n", frameType,
-			slice.PicParameterSetID, slice.FrameNum, slice.IdrPicID)
-
-		return frameType, nil
-	*/
 }

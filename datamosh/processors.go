@@ -127,11 +127,19 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 	for _, nalUnit := range NALunits {
 		switch nalUnit.Type {
 		case byte(NAL_SLICE):
-			// fmt.Printf("  P-frame or B-frame | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
-			nalUnit.ParseNALSlice(outputFile)
+			sliceType, err := nalUnit.ParseSlice(outputFile)
+			if err != nil {
+				fmt.Println("Error parsing slice:", err)
+				return err
+			}
+			fmt.Printf("  [%d] Frame: %s\n", nalUnit.TrackID, sliceType)
 		case byte(NAL_IDR_SLICE):
-			fmt.Printf("  IDR I-frame\t| offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
-			nalUnit.ParseNALSlice(outputFile)
+			sliceType, err := nalUnit.ParseSlice(outputFile)
+			if err != nil {
+				fmt.Println("Error parsing slice:", err)
+				return err
+			}
+			fmt.Printf("  [%d] IDR Frame: %s\n", nalUnit.TrackID, sliceType)
 			if !sawFirstIFrame {
 				sawFirstIFrame = true
 				// skip the first iframe since we want the video to start properly

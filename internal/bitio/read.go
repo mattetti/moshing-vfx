@@ -12,7 +12,11 @@ type Reader interface {
 
 	ReadBit() (bit bool, err error)
 
+	// ReadUInt reads n bits and returns an unsigned integer
 	ReadUInt(n int) (uint32, error)
+
+	// ReadUE reads an unsigned Exp-Golomb coded integer
+	ReadUE() (uint32, error)
 }
 
 type ReadSeeker interface {
@@ -87,6 +91,35 @@ func (r *reader) ReadUInt(n int) (uint32, error) {
 		}
 	}
 	return result, nil
+}
+
+// ReadUE reads an unsigned Exp-Golomb coded integer
+func (r *reader) ReadUE() (uint32, error) {
+	var leadingZeroBits int
+	for {
+		bit, err := r.ReadBit()
+		if err != nil {
+			return 0, err
+		}
+		if bit {
+			break
+		}
+		leadingZeroBits++
+		if leadingZeroBits >= 32 {
+			return 0, ErrInvalidAlignment
+		}
+	}
+
+	var codeNum uint32
+	if leadingZeroBits > 0 {
+		value, err := r.ReadUInt(leadingZeroBits)
+		if err != nil {
+			return 0, err
+		}
+		codeNum = (1 << leadingZeroBits) - 1 + value
+	}
+
+	return codeNum, nil
 }
 
 type readSeeker struct {
