@@ -14,7 +14,7 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
 	// w := mp4.NewWriter(outputFile)
 
-	var track *mp4.Track
+	var track *Track
 	// keeping track of NAL units so we can process them later
 	NALunits := []NALUnit{}
 
@@ -40,7 +40,7 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 		// header
 		case mp4.BoxTypeMvhd():
 
-			track = &mp4.Track{}
+			track = &Track{}
 			var mvhd mp4.Mvhd
 			if _, err := bi.SeekToPayload(r); err != nil {
 				return nil, err
@@ -163,7 +163,7 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 	return nil
 }
 
-func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
+func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*Track, error) {
 
 	bips, err := mp4.ExtractBoxesWithPayload(r, bi, []mp4.BoxPath{
 		{mp4.BoxTypeTkhd()},
@@ -201,7 +201,7 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 	var ctts *mp4.Ctts
 	var stsz *mp4.Stsz
 	var co64 *mp4.Co64
-	var track mp4.Track
+	var track Track
 
 	for _, bip := range bips {
 		switch bip.Info.Type {
@@ -269,14 +269,11 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 	track.Duration = mdhd.GetDuration()
 
 	if avc1 != nil && avcC != nil {
-		track.AVC = &mp4.AVCDecConfigInfo{
-			ConfigurationVersion: avcC.ConfigurationVersion,
-			Profile:              avcC.Profile,
-			ProfileCompatibility: avcC.ProfileCompatibility,
-			Level:                avcC.Level,
-			LengthSize:           uint16(avcC.LengthSizeMinusOne) + 1,
-			Width:                avc1.Width,
-			Height:               avc1.Height,
+		track.AVC = &AVCDecoderConfig{
+			AVCDecoderConfiguration: *avcC,
+			LengthSize:              uint16(avcC.LengthSizeMinusOne) + 1,
+			Width:                   avc1.Width,
+			Height:                  avc1.Height,
 		}
 	}
 
@@ -356,7 +353,7 @@ func processTrak(r io.ReadSeeker, bi *mp4.BoxInfo) (*mp4.Track, error) {
 	return &track, nil
 }
 
-func processTrack(r io.ReadSeeker, track *mp4.Track) ([]NALUnit, error) {
+func processTrack(r io.ReadSeeker, track *Track) ([]NALUnit, error) {
 	if track.AVC == nil {
 		return nil, errors.New("AVC configuration not found")
 	}
