@@ -121,13 +121,17 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 		return err
 	}
 
+	// TODO: keep track of SPS and PPS NAL units so we can look them up
+
 	sawFirstIFrame := false
 	for _, nalUnit := range NALunits {
 		switch nalUnit.Type {
-		case 1:
-			fmt.Printf("  P-frame or B-frame | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
-		case 5:
-			fmt.Printf("  I-frame\t| offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+		case byte(NAL_SLICE):
+			// fmt.Printf("  P-frame or B-frame | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+			nalUnit.ParseNALSlice(outputFile)
+		case byte(NAL_IDR_SLICE):
+			fmt.Printf("  IDR I-frame\t| offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+			nalUnit.ParseNALSlice(outputFile)
 			if !sawFirstIFrame {
 				sawFirstIFrame = true
 				// skip the first iframe since we want the video to start properly
@@ -137,6 +141,12 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 			nalUnit.Nullify(outputFile)
 		case 6:
 			fmt.Printf("  SEI Metadata | offset: %d, length: %d\n", nalUnit.Offset, nalUnit.Length)
+		case 7:
+			// sps, err = nalUnit.ParseSPS(outputFile)
+			// if err != nil {
+			// 	fmt.Println("Error parsing SPS:", err)
+			// 	return err
+			// }
 		default:
 			fmt.Printf("NAL type: %d, offset: %d, length: %d\n", nalUnit.Type, nalUnit.Offset, nalUnit.Length)
 		}
@@ -425,13 +435,12 @@ func processTrack(r io.ReadSeeker, track *mp4.Track) ([]NALUnit, error) {
 				}
 
 				nalUnits = append(nalUnits, NALUnit{
-					HeaderSize: lengthSize,
-					Type:       nalType,
-					Offset:     int64(dataOffset + uint64(nalOffset)),
-					Length:     length,
-					TrackID:    track.TrackID,
-					Chunk:      uint32(nChunk),
-					SampleID:   uint32(si),
+					Type:     nalType,
+					Offset:   int64(dataOffset+uint64(nalOffset)) + int64(lengthSize),
+					Length:   length,
+					TrackID:  track.TrackID,
+					Chunk:    uint32(nChunk),
+					SampleID: uint32(si),
 				})
 
 				nalOffset += lengthSize + length
