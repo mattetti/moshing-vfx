@@ -13,6 +13,7 @@ type Track struct {
 	Chunks    mp4.Chunks
 	AVC       *AVCDecoderConfig
 	MP4A      *mp4.MP4AInfo
+	NALs      []*NALUnit
 }
 
 type AVCDecoderConfig struct {
