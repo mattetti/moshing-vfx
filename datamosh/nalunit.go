@@ -35,12 +35,13 @@ const EVC_MAX_PPS_COUNT = 64
 
 // NALUnit represents a Network Abstraction Layer unit in a video file.
 type NALUnit struct {
-	Type     byte
-	Offset   int64  // inside the mdat box, first byte of the NAL unit data (header byte)
-	Length   uint32 // of the NAL unit data
-	TrackID  uint32
-	Chunk    uint32
-	SampleID uint32
+	Type      byte
+	Offset    int64  // inside the mdat box, first byte of the NAL unit data (header byte)
+	Length    uint32 // of the NAL unit data
+	TrackID   uint32
+	Chunk     uint32
+	SampleID  uint32
+	Timestamp uint64 // in the timescale of the track
 }
 
 type NALHeader struct {

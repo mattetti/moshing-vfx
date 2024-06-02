@@ -111,6 +111,8 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 
 			sawFirstIFrame := false
 			for _, nalUnit := range track.NALs {
+				timestampInSecs := float32(nalUnit.Timestamp / uint64(track.Timescale))
+
 				switch nalUnit.Type {
 				case byte(NAL_SLICE):
 					sliceType, err := nalUnit.ParseSlice(outputFile)
@@ -118,14 +120,16 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 						fmt.Println("Error parsing slice:", err)
 						return err
 					}
-					fmt.Printf("%s, ", sliceType)
+					if Debug {
+						fmt.Printf("%s ", sliceType)
+					}
 				case byte(NAL_IDR_SLICE):
 					sliceType, err := nalUnit.ParseSlice(outputFile)
 					if err != nil {
 						fmt.Println("Error parsing slice:", err)
 						return err
 					}
-					fmt.Printf("IDR Frame: %s\n", sliceType)
+					fmt.Printf("%.2f IDR Frame: %s\n", timestampInSecs, sliceType)
 					if !sawFirstIFrame {
 						sawFirstIFrame = true
 						// skip the first iframe since we want the video to start properly
@@ -356,6 +360,7 @@ func processTrack(r io.ReadSeeker, track *Track) ([]*NALUnit, error) {
 	nalUnits := []*NALUnit{}
 
 	var si int
+	currentTime := uint64(0)
 	for nChunk, chunk := range track.Chunks {
 		end := si + int(chunk.SamplesPerChunk)
 		dataOffset := chunk.DataOffset
@@ -367,6 +372,10 @@ func processTrack(r io.ReadSeeker, track *Track) ([]*NALUnit, error) {
 			if sample.Size == 0 {
 				continue
 			}
+
+			// Increment the current time by the sample's time delta
+			currentTime += uint64(sample.TimeDelta)
+
 			for nalOffset := uint32(0); nalOffset+lengthSize+1 <= sample.Size; {
 				if _, err := r.Seek(int64(dataOffset+uint64(nalOffset)), io.SeekStart); err != nil {
 					return nalUnits, err
@@ -434,12 +443,13 @@ func processTrack(r io.ReadSeeker, track *Track) ([]*NALUnit, error) {
 				}
 
 				nalUnits = append(nalUnits, &NALUnit{
-					Type:     nalType,
-					Offset:   int64(dataOffset+uint64(nalOffset)) + int64(lengthSize),
-					Length:   length,
-					TrackID:  track.TrackID,
-					Chunk:    uint32(nChunk),
-					SampleID: uint32(si),
+					Type:      nalType,
+					Offset:    int64(dataOffset+uint64(nalOffset)) + int64(lengthSize),
+					Length:    length,
+					TrackID:   track.TrackID,
+					Chunk:     uint32(nChunk),
+					SampleID:  uint32(si),
+					Timestamp: currentTime,
 				})
 
 				nalOffset += lengthSize + length
