@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/abema/go-mp4"
 	"github.com/sunfish-shogi/bufseekio"
@@ -17,43 +18,82 @@ type FrameProcessor func(context.Context, io.WriteSeeker, *NALUnit) (context.Con
 
 func NullifyIFrames(ctx context.Context, w io.WriteSeeker, nalUnit *NALUnit) (context.Context, error) {
 
-	// Note: the track should be available in the context
-	// if track, ok := ctx.Value(TrackKey).(*Track); ok {
-	// fmt.Printf("Track: %d\n", track.TrackID)
-	// }
-
-	if nalUnit.Type == NAL_IDR_SLICE {
-		// Retrieve the I-frame count from context
-		var iFrameCount int
-		var ok bool
-		iFrameCount, ok = ctx.Value(IFrameCountKey).(int)
-		if !ok {
-			iFrameCount = 0
-		}
-		iFrameCount++
-		// Store the updated I-frame count back in context
-		ctx = context.WithValue(ctx, IFrameCountKey, iFrameCount)
-
-		// we never nullify the first frame so the video starts properly
-		if iFrameCount == 1 {
-			return ctx, nil
-		}
-
-		err := nalUnit.Nullify(w)
-		if err == nil {
-			// update our counter
-			var iFrameRemovedCount int
-			if iFrameRemovedCount, ok = ctx.Value(IFrameRemovedCountKey).(int); !ok {
-				iFrameRemovedCount = 0
-			}
-			iFrameRemovedCount++
-			ctx = context.WithValue(ctx, IFrameRemovedCountKey, iFrameRemovedCount)
-		}
-
-		return ctx, err
+	if nalUnit.Type != NAL_IDR_SLICE {
+		return ctx, nil
 	}
 
-	return ctx, nil
+	// Retrieve and update I-frame count from context
+	iFrameCount := 0
+	if value, ok := ctx.Value(IFrameCountKey).(int); ok {
+		iFrameCount = value
+	}
+	iFrameCount++
+	ctx = context.WithValue(ctx, IFrameCountKey, iFrameCount)
+
+	// Retrieve track and interactive flag from context
+	track, _ := ctx.Value(TrackKey).(*Track)
+	isInteractive, _ := ctx.Value(InteractiveKey).(bool)
+	debug, _ := ctx.Value(DebugKey).(bool)
+
+	if debug {
+		if track != nil {
+			fmt.Printf("I-Frame #%d: pts: %.2f\n", iFrameCount, float32(nalUnit.Timestamp)/float32(track.Timescale))
+		} else {
+			fmt.Printf("I-Frame #%d: offset: %d, length: %d\n", iFrameCount, nalUnit.Offset, nalUnit.Length)
+		}
+	}
+
+	// Never nullify the first frame so the video starts properly
+	if iFrameCount == 1 {
+		return ctx, nil
+	}
+
+	var handleInteractiveMode = func(ctx context.Context, w io.WriteSeeker, nalUnit *NALUnit, track *Track) (context.Context, bool) {
+		fmt.Printf("Nullify I-frame at %.2f seconds? (y/n/a): ", float32(nalUnit.Timestamp)/float32(track.Timescale))
+		var response string
+		_, err := fmt.Scanln(&response)
+		if err != nil {
+			log.Printf("Error reading user input: %v", err)
+			return ctx, false
+		}
+
+		if strings.Contains(strings.ToLower(response), "n") {
+			return ctx, false
+		}
+		// a means yes to all from now on
+		if strings.Contains(strings.ToLower(response), "a") {
+			ctx = context.WithValue(ctx, InteractiveKey, false)
+		}
+		return ctx, true
+	}
+
+	var err error
+	if isInteractive {
+		if track == nil {
+			log.Printf("Track not found in context, can't nullify I-frame in interactive mode")
+			err = nalUnit.Nullify(w)
+		} else {
+			var shouldNullify bool
+			ctx, shouldNullify = handleInteractiveMode(ctx, w, nalUnit, track)
+			if !shouldNullify {
+				return ctx, nil
+			}
+		}
+	} else {
+		err = nalUnit.Nullify(w)
+	}
+
+	// Update I-frame removed count in context if nullification was successful
+	if err == nil {
+		iFrameRemovedCount := 0
+		if value, ok := ctx.Value(IFrameRemovedCountKey).(int); ok {
+			iFrameRemovedCount = value
+		}
+		iFrameRemovedCount++
+		ctx = context.WithValue(ctx, IFrameRemovedCountKey, iFrameRemovedCount)
+	}
+
+	return ctx, err
 }
 
 func ProcessFrames(ctx context.Context, inputFile *os.File, fn FrameProcessor) (context.Context, error) {
@@ -87,7 +127,6 @@ func ProcessFrames(ctx context.Context, inputFile *os.File, fn FrameProcessor) (
 func ParseTracks(r io.ReadSeeker) ([]*Track, error) {
 	var err error
 	tracks := []*Track{}
-	// keeping track of NAL units so we can process them later
 
 	_, err = mp4.ReadBoxStructure(r, func(h *mp4.ReadHandle) (interface{}, error) {
 
@@ -442,8 +481,8 @@ func processTrack(r io.ReadSeeker, track *Track) ([]*NALUnit, error) {
 				continue
 			}
 
-			// Increment the current time by the sample's time delta
-			currentTime += uint64(sample.TimeDelta)
+			// Calculate presentation time for the sample
+			presentationTime := currentTime + uint64(sample.CompositionTimeOffset)
 
 			for nalOffset := uint32(0); nalOffset+lengthSize+1 <= sample.Size; {
 				if _, err := r.Seek(int64(dataOffset+uint64(nalOffset)), io.SeekStart); err != nil {
@@ -518,12 +557,14 @@ func processTrack(r io.ReadSeeker, track *Track) ([]*NALUnit, error) {
 					TrackID:   track.TrackID,
 					Chunk:     uint32(nChunk),
 					SampleID:  uint32(si),
-					Timestamp: currentTime,
+					Timestamp: presentationTime,
 				})
 
 				nalOffset += lengthSize + length
 			}
 			dataOffset += uint64(sample.Size)
+			// Increment the current time by the sample's time delta
+			currentTime += uint64(sample.TimeDelta)
 		}
 	}
 

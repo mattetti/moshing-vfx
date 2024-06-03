@@ -13,9 +13,11 @@ var Debug bool
 type key int
 
 const (
-	IFrameCountKey key = iota
+	DebugKey key = iota
+	IFrameCountKey
 	TrackKey
 	IFrameRemovedCountKey
+	InteractiveKey
 )
 
 // readBitsInt reads the specified number of bits from the reader and returns as an int.

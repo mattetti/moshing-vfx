@@ -11,19 +11,21 @@ import (
 	"github.com/mattetti/moshing-vfx/datamosh"
 )
 
-var debug = flag.Bool("debug", false, "Enable debug mode")
-var interactive = flag.Bool("i", false, "Enable interactive mode")
+var (
+	inputFlag       = flag.String("input", "", "Input file")
+	debugFlag       = flag.Bool("debug", false, "Enable debug mode")
+	interactiveFlag = flag.Bool("interactive", false, "Enable interactive mode")
+)
 
 func main() {
 	flag.Parse()
-
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: <input_file> <optional flags>")
+	if *inputFlag == "" {
+		fmt.Println("input file is required")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	inputFileName := os.Args[1]
+	inputFileName := *inputFlag
 	ext := filepath.Ext(inputFileName)
 	outputFileName := filepath.Join(filepath.Dir(inputFileName), fmt.Sprintf("%s-iframoshed%s", filepath.Base(inputFileName)[:len(ext)], ext))
 
@@ -49,16 +51,16 @@ func main() {
 
 	// Initialize the context with the I-frame count
 	ctx := context.WithValue(context.Background(), datamosh.IFrameCountKey, 0)
+	ctx = context.WithValue(ctx, datamosh.DebugKey, *debugFlag)
 
-	if *interactive {
-		// Interactive mode ask about what iframes to delete
-	} else {
-		// Non-interactive mode, nullify all iframes
-		ctx, err = datamosh.ProcessFrames(ctx, outputFile, datamosh.NullifyIFrames)
-		if err != nil {
-			fmt.Println("Error processing frames:", err)
-			return
-		}
+	if *interactiveFlag {
+		ctx = context.WithValue(ctx, datamosh.InteractiveKey, *interactiveFlag)
+	}
+
+	ctx, err = datamosh.ProcessFrames(ctx, outputFile, datamosh.NullifyIFrames)
+	if err != nil {
+		fmt.Println("Error processing frames:", err)
+		return
 	}
 
 	// Retrieve the final I-frame count from context
