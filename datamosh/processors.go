@@ -1,20 +1,91 @@
 package datamosh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/abema/go-mp4"
 	"github.com/sunfish-shogi/bufseekio"
 )
 
-func ProcessFile(inputFile *os.File, outputFile *os.File) error {
-	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
-	var err error
-	// w := mp4.NewWriter(outputFile)
+// function type to process frames/NAL units
+type FrameProcessor func(context.Context, io.WriteSeeker, *NALUnit) (context.Context, error)
 
+func NullifyIFrames(ctx context.Context, w io.WriteSeeker, nalUnit *NALUnit) (context.Context, error) {
+
+	// Note: the track should be available in the context
+	// if track, ok := ctx.Value(TrackKey).(*Track); ok {
+	// fmt.Printf("Track: %d\n", track.TrackID)
+	// }
+
+	if nalUnit.Type == NAL_IDR_SLICE {
+		// Retrieve the I-frame count from context
+		var iFrameCount int
+		var ok bool
+		iFrameCount, ok = ctx.Value(IFrameCountKey).(int)
+		if !ok {
+			iFrameCount = 0
+		}
+		iFrameCount++
+		// Store the updated I-frame count back in context
+		ctx = context.WithValue(ctx, IFrameCountKey, iFrameCount)
+
+		// we never nullify the first frame so the video starts properly
+		if iFrameCount == 1 {
+			return ctx, nil
+		}
+
+		err := nalUnit.Nullify(w)
+		if err == nil {
+			// update our counter
+			var iFrameRemovedCount int
+			if iFrameRemovedCount, ok = ctx.Value(IFrameRemovedCountKey).(int); !ok {
+				iFrameRemovedCount = 0
+			}
+			iFrameRemovedCount++
+			ctx = context.WithValue(ctx, IFrameRemovedCountKey, iFrameRemovedCount)
+		}
+
+		return ctx, err
+	}
+
+	return ctx, nil
+}
+
+func ProcessFrames(ctx context.Context, inputFile *os.File, fn FrameProcessor) (context.Context, error) {
+
+	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
+
+	tracks, err := ParseTracks(r)
+	if err != nil {
+		fmt.Println("Error parsing tracks:", err)
+		return ctx, err
+	}
+
+	currentContext := ctx
+	for _, track := range tracks {
+		if track.AVC != nil {
+			currentContext = context.WithValue(currentContext, TrackKey, track)
+			for _, nalUnit := range track.NALs {
+				currentContext, err = fn(currentContext, inputFile, nalUnit)
+				if err != nil {
+					log.Printf("Error processing frame: %v - %v", nalUnit, err)
+					return currentContext, err
+				}
+			}
+		}
+	}
+
+	return currentContext, nil
+}
+
+// Parse Tracks parses the track information from the reader and returns a slice of tracks.
+func ParseTracks(r io.ReadSeeker) ([]*Track, error) {
+	var err error
 	tracks := []*Track{}
 	// keeping track of NAL units so we can process them later
 
@@ -25,10 +96,6 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 		}
 
 		if !h.BoxInfo.IsSupportedType() {
-			// copy all data
-			// if err = w.CopyBox(r, &h.BoxInfo); err != nil {
-			// 	return nil, err
-			// }
 			return nil, nil
 		}
 
@@ -36,9 +103,6 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 		var err error
 
 		switch h.BoxInfo.Type {
-
-		// case mp4.BoxTypeMvhd():
-
 		case mp4.BoxTypeTrak():
 			track, err := processTrak(r, bi)
 			if err != nil {
@@ -52,12 +116,6 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 				}
 			}
 			tracks = append(tracks, track)
-
-		case mp4.BoxTypeMdat():
-			if Debug {
-				fmt.Println("mdat box found, TODO: process it")
-				fmt.Printf("Offset: %d, Size: %d\n\n", bi.Offset, bi.Size)
-			}
 		default:
 		}
 
@@ -70,6 +128,17 @@ func ProcessFile(inputFile *os.File, outputFile *os.File) error {
 
 	if err != nil {
 		fmt.Println("Error reading box structure:", err)
+		return tracks, err
+	}
+
+	return tracks, nil
+}
+
+func ProcessFile(inputFile *os.File, outputFile *os.File) error {
+	r := bufseekio.NewReadSeeker(inputFile, 128*1024, 4)
+	tracks, err := ParseTracks(r)
+	if err != nil {
+		fmt.Println("Error parsing tracks:", err)
 		return err
 	}
 

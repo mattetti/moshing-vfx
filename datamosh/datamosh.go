@@ -10,6 +10,14 @@ import (
 
 var Debug bool
 
+type key int
+
+const (
+	IFrameCountKey key = iota
+	TrackKey
+	IFrameRemovedCountKey
+)
+
 // readBitsInt reads the specified number of bits from the reader and returns as an int.
 func readBitsInt(r io.Reader, bitPos *int, currentByte *byte, buffer *[]byte, numBits int) (int, error) {
 	value, err := readBits(r, bitPos, currentByte, buffer, numBits)
