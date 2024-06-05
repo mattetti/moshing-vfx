@@ -45,8 +45,11 @@ type NALUnit struct {
 }
 
 type NALHeader struct {
-	NalRefIdc   uint32
-	NalUnitType uint32
+	NalRefIdc      uint32
+	NalUnitType    uint32
+	FirstMBInSlice uint32
+	SliceType      uint32
+	PicParamID     uint32
 }
 
 // NALSlice represents the parsed slice header data.
@@ -137,12 +140,12 @@ func (n *NALUnit) ParseHeader(r io.ReadSeeker) (NALHeader, error) {
 	if forbiddenZeroBit != 0 {
 		return header, fmt.Errorf("forbidden_zero_bit is not 0")
 	}
+
 	// nal_ref_idc u(2)
 	header.NalRefIdc, err = br.ReadUInt(2)
 	if err != nil {
 		return header, fmt.Errorf("failed to read nal_ref_idc: %v", err)
 	}
-
 	// nal_unit_type u(5)
 	header.NalUnitType, err = br.ReadUInt(5)
 	if err != nil {
@@ -166,6 +169,22 @@ func (n *NALUnit) ParseHeader(r io.ReadSeeker) (NALHeader, error) {
 			n.Type == NAL_FILLER {
 			return header, errors.New("unexpected NAL ref idc for non-reference slice")
 		}
+	}
+
+	header.FirstMBInSlice, err = br.ReadUE()
+	if err != nil {
+		return header, fmt.Errorf("failed to read first_mb_in_slice: %v", err)
+	}
+
+	header.SliceType, err = br.ReadUE()
+	if err != nil {
+		return header, fmt.Errorf("failed to read slice_type: %v", err)
+	}
+	header.SliceType = header.SliceType % 5
+
+	header.PicParamID, err = br.ReadUE()
+	if err != nil {
+		return header, fmt.Errorf("failed to read pic_parameter_set_id: %v", err)
 	}
 
 	return header, nil
